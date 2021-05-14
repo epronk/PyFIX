@@ -13,7 +13,7 @@ config = {
     'install_requires': [''],
     'packages': ['pyfix', 'pyfix/FIX44'],
     'scripts': [],
-    'name': 'pyfix'
+    'name': 'pyfix-fork'
 }
 
 setup(**config)
