@@ -4,7 +4,7 @@ except ImportError:
     from distutils.core import setup
 
 config = {
-    'description': 'pyfix',
+    'description': 'FIX (Financial Information eXchange) Engine implemented in Python',
     'author': 'Tom Fewster',
     'url': 'https://github.com/wannabegeek/PyFIX/',
     'download_url': 'https://github.com/wannabegeek/PyFIX/',
