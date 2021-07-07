@@ -31,7 +31,7 @@ class FIXContext(object):
         self.tags = OrderedDict()
 
     def setField(self, tag, value):
-        self.tags[tag] = value
+        self.tags[int(tag)] = value
 
     def removeField(self, tag):
         try:
@@ -40,7 +40,7 @@ class FIXContext(object):
             pass
 
     def getField(self, tag):
-        return self.tags[tag]
+        return self.tags[int(tag)]
 
     def addRepeatingGroup(self, tag, group, index=-1):
         if tag in self.tags:
@@ -71,7 +71,7 @@ class FIXContext(object):
     def getRepeatingGroupByTag(self, tag, identifierTag, identifierValue):
         if self.isRepeatingGroup(tag):
             for group in self.tags[tag].groups:
-                if identifierTag in group.tags:
+                if int(identifierTag) in group.tags:
                     if group.getField(identifierTag) == identifierValue:
                         return group
         return None

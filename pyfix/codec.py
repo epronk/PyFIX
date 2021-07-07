@@ -1,12 +1,172 @@
 from datetime import datetime
 import logging
 from pyfix.message import FIXMessage, FIXContext
+from fixorchestra.orchestration import *
+from more_itertools import peekable
+
+
+class DictBuilder(object):
+    def insert(self, obj, value):
+        obj.append(value)
+
+    def createNode(self):
+        return []
+
+    def insertList(self, output, tag):
+        node = []
+        output.append(node)
+        return node
+
+    def insertNode(self, output, tag, t):
+        node = []
+        output.append({tag: node})
+        return node
+
+
+class Parser(object):
+    def __init__(self, dictionary, builder):
+        self.dictionary = dictionary
+        self.builder = builder
+        self.output = builder.createNode()
+        self.header_tags = tuple(x.field_id for x in dictionary.orchestration.components["1024"].references)
+
+    def parse(self, it):
+        message = self.parseHeader(it)
+        try:
+            self.parseMessage(it, message, self.output)
+        except StopIteration as e:
+            pass
+
+    def parseHeader(self, it):
+        tag, value = it.peek()
+        while tag in self.header_tags:
+            if tag == 35:
+                message = self.dictionary.orchestration.messages_by_msg_type[value]
+            tag, value = next(it)
+            self.builder.insert(self.output, (tag, value))
+            tag, value = it.peek()
+        return message
+
+    def parseMessage(self, it, message, output):
+        index = self.dictionary.tag_index[message.id]
+        while True:
+            tag, value = it.peek()
+            entity = index.get(tag)
+            if entity is None:
+                pass
+            elif entity is message:
+                pass
+            elif isinstance(entity, Component):
+                self.parseComponent(it, entity, self.output)
+            else:
+                self.parseGroup(it, entity, self.output)
+                continue
+            tag, value = next(it)
+            self.builder.insert(self.output, (tag, value))
+
+    def parseComponent(self, it, message, output):
+        index = self.dictionary.tag_index[message.id]
+        while True:
+            tag, value = it.peek()
+            entity = index.get(tag)
+            if entity is None:
+                return
+            elif entity is message:
+                pass
+            elif isinstance(entity, Component):
+                self.parse_component(it, entity, self.output)
+            else:
+                self.parseGroup(it, entity, self.output)
+                continue
+            self.builder.insert(self.output, (tag, value))
+            next(it)
+
+    def parseGroup(self, it, group, output):
+        index = self.dictionary.tag_index[group.id]
+        tag, value = next(it)
+        node = self.builder.insertNode(output, tag, (tag, value))
+        tag, value = it.peek()
+        first = tag
+        while True:
+            while True:
+                entity = index.get(tag)
+                if entity is group:
+                    if tag == first:
+                        ol = self.builder.insertList(node, tag)
+                    self.builder.insert(ol, (tag, value))
+                    next(it)
+                    tag, value = it.peek()
+                elif isinstance(entity, Group):
+                    self.parseGroup(it, entity, ol)
+                    tag, value = it.peek()
+                    break
+                else:
+                    break
+            if tag != first:
+                break
+
+
+class Dictionary:
+    def __init__(self, orchestration):
+        self.orchestration = orchestration
+        self.tag_index = {}
+        self.buildIndex()
+
+    def buildIndex(self):
+        for k, v in self.orchestration.messages.items():
+            message = self.orchestration.messages_by_msg_type[v.msg_type]
+            references = iter(message.references)
+            next(references)  # skip header
+            self.references_to_fields(references, 0, (message,))
+
+    def references_to_fields(self, references, depth, context):
+        result = {}
+        for reference in references:
+            if reference.field_id:
+                adding = (MessageField(self.orchestration.fields_by_tag[reference.field_id], reference.presence, depth), context)
+                result[reference.field_id] = context[-1]
+            elif reference.group_id:
+                group = self.orchestration.groups[reference.group_id]
+                adding = self.references_to_fields(group.references, depth, context + (group,))
+                first = next(iter(adding))
+                result[first] = adding[first]
+            elif reference.component_id:
+                component = self.orchestration.components[reference.component_id]
+                adding = self.references_to_fields(component.references, depth, context + (component,))
+                result.update(adding)
+        self.tag_index.setdefault(context[-1].id, result)
+        return result
+
+
+class Writer:
+
+    def __init__(self):
+        self.txt = ''
+
+    def write(self, msg):
+        self.txt = '|'.join(self.get_item(item) for item in msg)
+
+    def get_item(self, msg):
+        if isinstance(msg, tuple):
+            return str(msg[0]) + '=' + msg[1]
+        elif isinstance(msg, dict):
+            txt = ''
+            for k, v in msg.items():
+                txt += str(k) + '=' + str(len(v)) + '=>'
+                txt += '['
+                txt += ', '.join(['|'.join(self.get_item(y) for y in x) for x in v])
+                txt += ']'
+
+            return txt
+
 
 class EncodingError(Exception):
     pass
 
+
 class DecodingError(Exception):
     pass
+
 
 class RepeatingGroupContext(FIXContext):
     def __init__(self, tag, repeatingGroupTags, parent):
@@ -14,6 +174,7 @@ class RepeatingGroupContext(FIXContext):
         self.repeatingGroupTags = repeatingGroupTags
         self.parent = parent
         FIXContext.__init__(self)
+
 
 class Codec(object):
     def __init__(self, protocol):
@@ -40,32 +201,32 @@ class Codec(object):
 
         msgType = msg.msgType
 
-        body.append("%s=%s" % (self.protocol.fixtags.SenderCompID, session.senderCompId))
-        body.append("%s=%s" % (self.protocol.fixtags.TargetCompID, session.targetCompId))
+        body.append("%s=%s" % (int(self.protocol.fixtags.SenderCompID), session.senderCompId))
+        body.append("%s=%s" % (int(self.protocol.fixtags.TargetCompID), session.targetCompId))
 
         seqNo = 0
-        if msgType == self.protocol.msgtype.SEQUENCERESET:
+        if msgType == self.protocol.msgtype.SequenceReset:
             if self.protocol.fixtags.GapFillFlag in msg and msg[self.protocol.fixtags.GapFillFlag] == "Y":
                 # in this case the sequence number should already be on the message
                 try:
-                    seqNo = msg[self.protocol.fixtags.MsgSeqNum]
+                    seqNo = msg[int(self.protocol.fixtags.MsgSeqNum)]
                 except KeyError:
                     raise EncodingError("SequenceReset with GapFill='Y' must have the MsgSeqNum already populated")
             else:
                 msg[self.protocol.fixtags.NewSeqNo] = session.allocateSndSeqNo()
-                seqNo = msg[self.protocol.fixtags.MsgSeqNum]
+                seqNo = msg[int(self.protocol.fixtags.MsgSeqNum)]
         else:
             # if we have the PossDupFlag set, we need to send the message with the same seqNo
             if self.protocol.fixtags.PossDupFlag in msg and msg[self.protocol.fixtags.PossDupFlag] == "Y":
                 try:
-                    seqNo = msg[self.protocol.fixtags.MsgSeqNum]
+                    seqNo = msg[int(self.protocol.fixtags.MsgSeqNum)]
                 except KeyError:
                     raise EncodingError("Failed to encode message with PossDupFlay=Y but no previous MsgSeqNum")
             else:
                 seqNo = session.allocateSndSeqNo()
 
-        body.append("%s=%s" % (self.protocol.fixtags.MsgSeqNum, seqNo))
-        body.append("%s=%s" % (self.protocol.fixtags.SendingTime, self.current_datetime()))
+        body.append("%s=%s" % (int(self.protocol.fixtags.MsgSeqNum), seqNo))
+        body.append("%s=%s" % (int(self.protocol.fixtags.SendingTime), self.current_datetime()))
 
         for t in msg.tags:
             self._addTag(body, t, msg)
@@ -77,112 +238,26 @@ class Codec(object):
 
         # Create header
         header = []
-        msgType = "%s=%s" % (self.protocol.fixtags.MsgType, msgType)
-        header.append("%s=%s" % (self.protocol.fixtags.BeginString, self.protocol.beginstring))
-        header.append("%s=%i" % (self.protocol.fixtags.BodyLength, len(body) + len(msgType) + 1))
+        msgType = "%s=%s" % (int(self.protocol.fixtags.MsgType), str(msgType))
+        header.append("%s=%s" % (int(self.protocol.fixtags.BeginString), self.protocol.beginstring))
+        header.append("%s=%i" % (int(self.protocol.fixtags.BodyLength), len(body) + len(msgType) + 1))
         header.append(msgType)
 
         fixmsg = self.SOH.join(header) + self.SOH + body
 
         cksum = sum([ord(i) for i in list(fixmsg)]) % 256
-        fixmsg = fixmsg + "%s=%0.3i" % (self.protocol.fixtags.CheckSum, cksum)
-
-        #print len(fixmsg)
+        fixmsg = fixmsg + "%s=%0.3i" % (int(self.protocol.fixtags.CheckSum), cksum)
 
         return fixmsg + SEP
 
     def decode(self, rawmsg):
-        #msg = rawmsg.rstrip(os.linesep).split(SOH)
-        try:
-            rawmsg = rawmsg.decode('utf-8')
-            msg = rawmsg.split(self.SOH)
-            msg = msg[:-1]
-
-            if len(msg) < 3: # at a minumum we require BeginString, BodyLength & Checksum
-                return (None, 0)
-
-            tag, value = msg[0].split('=', 1)
-            if tag != self.protocol.fixtags.BeginString:
-                logging.error("*** BeginString missing or not 1st field *** [" + tag + "]")
-            elif value != self.protocol.beginstring:
-                logging.error("FIX Version unexpected (Recv: %s Expected: %s)" % (value, self.protocol.beginstring))
-
-            tag, value = msg[1].split('=', 1)
-            msgLength = len(msg[0]) + len(msg[1]) + len('10=000') + 3
-            if tag != self.protocol.fixtags.BodyLength:
-                logging.error("*** BodyLength missing or not 2nd field *** [" + tag + "]")
-            else:
-                msgLength += int(value)
-
-            # do we have a complete message on the sockt
-            if msgLength > len(rawmsg):
-                return (None, 0)
-            else:
-                remainingMsgFragment = msgLength
-
-                # resplit our message
-                msg = rawmsg[:msgLength].split(self.SOH)
-                msg = msg[:-1]
-                decodedMsg = FIXMessage("UNKNOWN")
-
-                # logging.debug("\t-----------------------------------------")
-                # logging.debug("\t" + "|".join(msg))
-
-                repeatingGroups = []
-                repeatingGroupTags = self.protocol.fixtags.repeatingGroupIdentifiers()
-                currentContext = decodedMsg
-
-                for m in msg:
-                    tag, value = m.split('=', 1)
-                    t = None
-                    try:
-                        t = self.protocol.fixtags.tagToName(tag)
-                    except KeyError:
-                        logging.info("\t%s(Unknown): %s" % (tag, value))
-                        t = "{unknown}"
-
-                    if tag == self.protocol.fixtags.CheckSum:
-                        cksum = ((sum([ord(i) for i in list(self.SOH.join(msg[:-1]))]) + 1) % 256)
-                        if cksum != int(value):
-                            logging.warning("\tCheckSum: %s (INVALID) expecting %s" % (int(value), cksum))
-                    elif tag == self.protocol.fixtags.MsgType:
-                        try:
-                            msgType =  self.protocol.msgtype.msgTypeToName(value)
-                            decodedMsg.setMsgType(value)
-                        except KeyError:
-                            logging.error('*** MsgType "%s" not supported ***')
-
-                    if tag in repeatingGroupTags: # found the start of a repeating group
-                        if type(currentContext) is RepeatingGroupContext: # i.e. we are already in a repeating group
-                            while repeatingGroups and tag not in currentContext.repeatingGroupTags:
-                                currentContext.parent.addRepeatingGroup(currentContext.tag, currentContext)
-                                currentContext = currentContext.parent
-                                del repeatingGroups[-1] # pop the completed group off the stack
-
-                        ctx = RepeatingGroupContext(tag, repeatingGroupTags[tag], currentContext)
-                        repeatingGroups.append(ctx)
-                        currentContext = ctx
-                    elif repeatingGroups: # we have 1 or more repeating groups in progress & our tag isn't the start of a group
-                        while repeatingGroups and tag not in currentContext.repeatingGroupTags:
-                            currentContext.parent.addRepeatingGroup(currentContext.tag, currentContext)
-                            currentContext = currentContext.parent
-                            del repeatingGroups[-1] # pop the completed group off the stack
-
-                        if tag in currentContext.tags:
-                            # if the repeating group already contains this field, start the next
-                            currentContext.parent.addRepeatingGroup(currentContext.tag, currentContext)
-                            ctx = RepeatingGroupContext(currentContext.tag, currentContext.repeatingGroupTags, currentContext.parent)
-                            del repeatingGroups[-1] # pop the completed group off the stack
-                            repeatingGroups.append(ctx)
-                            currentContext = ctx
-
-                        # else add it to the current one
-                        currentContext.setField(tag, value)
-                    else:
-                        # this isn't a repeating group field, so just add it normally
-                        decodedMsg.setField(tag, value)
-
-                return (decodedMsg, remainingMsgFragment)
-        except UnicodeDecodeError as why:
-            logging.error("Failed to parse message %s" % (why, ))
-            return (None, 0)
+        rawmsg = rawmsg.decode('utf-8')
+        tup = [(int(k), v) for k, v in tuple((x.split('=')) for x in rawmsg[:-1].split(self.SOH))]
+        builder = DictBuilder()
+        theIndex = Dictionary(Orchestration('fix_repository_4_4.xml'))
+        p = Parser(theIndex, builder)
+        it = peekable(tup)
+        p.parse(it)
+        writer = Writer()
+        writer.write(p.output)
+        return writer.txt, None

@@ -12,7 +12,7 @@ config = {
     'maintainer': 'Eddy Pronk',
     'maintainer_email': 'epronk@muftor.com',
     'version': '0.1',
-    'install_requires': [''],
+    'install_requires': ['fixorchestra', 'more-itertools', 'mock'],
     'packages': ['pyfix', 'pyfix/FIX44'],
     'scripts': [],
     'name': 'pyfix-fork'
