@@ -1,10 +1,10 @@
 import asyncio
 from enum import Enum
 import logging
-from pyfix.connection import ConnectionState, MessageDirection
-from pyfix.engine import FIXEngine
+from pyfix.asyncio.connection import ConnectionState, MessageDirection
+from pyfix.asyncio.engine import FIXEngine
 from pyfix.message import FIXMessage
-from pyfix.server_connection import FIXServer
+from pyfix.asyncio.server_connection import FIXServer
 
 
 class Side(Enum):
@@ -34,16 +34,16 @@ class Server(FIXEngine):
     async def onConnect(self, session):
         logging.info("Accepted new connection from %s" % (session.address(),))
         # register to receive message notifications on the session which has just been created
-        session.addMessageHandler(self.onLogin, MessageDirection.OUTBOUND, self.server.protocol.msgtype.LOGON)
+        session.addMessageHandler(self.onLogin, MessageDirection.OUTBOUND, self.server.protocol.msgtype.Logon)
         session.addMessageHandler(self.onNewOrder, MessageDirection.INBOUND,
-                                  self.server.protocol.msgtype.NEWORDERSINGLE)
+                                  self.server.protocol.msgtype.NewOrderSingle)
 
     async def onDisconnect(self, session):
         logging.info("%s has disconnected" % (session.address(),))
         # we need to clean up our handlers, since this session is disconnected now
-        session.removeMessageHandler(self.onLogin, MessageDirection.OUTBOUND, self.server.protocol.msgtype.LOGON)
+        session.removeMessageHandler(self.onLogin, MessageDirection.OUTBOUND, self.server.protocol.msgtype.Logon)
         session.removeMessageHandler(self.onNewOrder, MessageDirection.INBOUND,
-                                     self.server.protocol.msgtype.NEWORDERSINGLE)
+                                     self.server.protocol.msgtype.NewOrderSingle)
 
     async def onLogin(self, connectionHandler, msg):
         codec = connectionHandler.codec
@@ -61,7 +61,7 @@ class Server(FIXEngine):
                 request.getField(codec.protocol.fixtags.Price)))
 
             # respond with an ExecutionReport Ack
-            msg = FIXMessage(codec.protocol.msgtype.EXECUTIONREPORT)
+            msg = FIXMessage(codec.protocol.msgtype.ExecutionReport)
             msg.setField(codec.protocol.fixtags.Price, request.getField(codec.protocol.fixtags.Price))
             msg.setField(codec.protocol.fixtags.OrderQty, request.getField(codec.protocol.fixtags.OrderQty))
             msg.setField(codec.protocol.fixtags.Symbol, request.getField(codec.protocol.fixtags.OrderQty))
@@ -83,7 +83,7 @@ class Server(FIXEngine):
                 request.getField(codec.protocol.fixtags.Symbol), side.name,
                 request.getField(codec.protocol.fixtags.OrderQty), request.getField(codec.protocol.fixtags.Price)))
         except Exception as e:
-            msg = FIXMessage(codec.protocol.msgtype.EXECUTIONREPORT)
+            msg = FIXMessage(codec.protocol.msgtype.ExecutionReport)
             msg.setField(codec.protocol.fixtags.OrdStatus, "4")
             msg.setField(codec.protocol.fixtags.ExecType, "4")
             msg.setField(codec.protocol.fixtags.LeavesQty, "0")

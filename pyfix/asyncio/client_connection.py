@@ -6,12 +6,12 @@ from pyfix.FIX44 import fixtags
 from pyfix.journaler import DuplicateSeqNoError
 from pyfix.message import FIXMessage
 from pyfix.session import FIXSession
-from pyfix.connection import FIXEndPoint, ConnectionState, MessageDirection, FIXConnectionHandler
+from pyfix.asyncio.connection import FIXEndPoint, ConnectionState, MessageDirection, FIXConnectionHandler
 
 
 class FIXClientConnectionHandler(FIXConnectionHandler):
     def __init__(self, engine, protocol, targetCompId, senderCompId, reader, writer, addr=None, observer=None,
-                 targetSubId=None, senderSubId=None, heartbeatTimeout=30, heartbeat=1):
+                 targetSubId=None, senderSubId=None, heartbeatTimeout=30, heartbeat=30):
         FIXConnectionHandler.__init__(self, engine, protocol, reader, writer, addr, observer)
 
         self.targetCompId = targetCompId
@@ -31,7 +31,7 @@ class FIXClientConnectionHandler(FIXConnectionHandler):
         asyncio.ensure_future(self.logon())
 
     async def logon(self):
-        logonMsg = self.protocol.messages.Messages.logon()
+        logonMsg = self.protocol.Messages.logon()
         logonMsg.setField(fixtags.HeartBtInt, self.heartbeat)
         await self.sendMsg(logonMsg)
 
@@ -44,15 +44,17 @@ class FIXClientConnectionHandler(FIXConnectionHandler):
         msgType = msg[protocol.fixtags.MsgType]
         targetCompId = msg[protocol.fixtags.TargetCompID]
         senderCompId = msg[protocol.fixtags.SenderCompID]
-
-        if msgType == protocol.msgtype.LOGON:
+        if msgType == protocol.msgtype.Logon:
             if self.connectionState == ConnectionState.LOGGED_IN:
                 logging.warning("Client session already logged in - ignoring login request")
             else:
                 try:
                     self.connectionState = ConnectionState.LOGGED_IN
+                    print('client logged in')
+                    for f in self.loggedIn:
+                        f.set_result(self)
                     self.heartbeatPeriod = float(msg[protocol.fixtags.HeartBtInt])
-                except DuplicateSeqNoError:
+                except DuplicateSeqNoError: # ??????????????????
                     logging.error("Failed to process login request with duplicate seq no")
                     await self.disconnect()
                     return
@@ -63,14 +65,14 @@ class FIXClientConnectionHandler(FIXConnectionHandler):
                 await self.disconnect()
                 return
 
-            if msgType == protocol.msgtype.LOGOUT:
+            if msgType == protocol.msgtype.Logout:
                 self.connectionState = ConnectionState.LOGGED_OUT
                 self.handle_close()
-            elif msgType == protocol.msgtype.TESTREQUEST:
-                responses.append(protocol.messages.Messages.heartbeat())
-            elif msgType == protocol.msgtype.RESENDREQUEST:
+            elif msgType == protocol.msgtype.TestRequest:
+                responses.append(protocol.Messages.heartbeat())
+            elif msgType == protocol.msgtype.ResendRequest:
                 responses.extend(self._handleResendRequest(msg))
-            elif msgType == protocol.msgtype.SEQUENCERESET:
+            elif msgType == protocol.msgtype.SequenceReset:
                 # we can treat GapFill and SequenceReset in the same way
                 # in both cases we will just reset the seq number to the
                 # NewSeqNo received in the message
@@ -100,7 +102,7 @@ class FIXClient(FIXEndPoint):
         FIXEndPoint.__init__(self, engine, protocol)
 
     async def start(self, host, port, loop):
-        self.reader, self.writer = await asyncio.open_connection(host, port, loop=loop)
+        self.reader, self.writer = await asyncio.open_connection(host, port)
         self.addr = (host, port)
         logging.info("Connected to %s" % repr(self.addr))
         connection = FIXClientConnectionHandler(self.engine, self.protocol, self.targetCompId, self.senderCompId,
@@ -108,8 +110,15 @@ class FIXClient(FIXEndPoint):
                                                 self.senderSubId,
                                                 self.heartbeatTimeout)
         self.connections.append(connection)
+        #print('notify')
+        #for handler in self.connectionHandlers:
+            #print('handler', type(handler[1]), handler[1], type(ConnectionState.CONNECTED))
+            #if handler[1] == ConnectionState.CONNECTED:
+            #    print('yes')
         for handler in filter(lambda x: x[1] == ConnectionState.CONNECTED, self.connectionHandlers):
             await handler[0](connection)
+        for t in self.connected:
+            t.set_result(connection)
 
     def stop(self):
         logging.info("Stopping client connections")

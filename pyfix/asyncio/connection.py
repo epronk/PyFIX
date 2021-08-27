@@ -1,10 +1,9 @@
 import asyncio
-import importlib
 import sys
 from pyfix.codec import Codec
 from pyfix.journaler import DuplicateSeqNoError
-from pyfix.message import FIXMessage, MessageDirection
-
+from pyfix.message import FIXMessage, FIXMessageSimple, MessageDirection
+from pyfix.protocol import LoadProtocol
 from pyfix.session import *
 from enum import Enum
 
@@ -42,6 +41,7 @@ class FIXConnectionHandler(object):
         self.msgBuffer = b''
         self.heartbeatPeriod = 30.0
         self.msgHandlers = []
+        self.loggedIn = []
         self.reader, self.writer = reader, writer
         self.heartbeatTimerRegistration = None
         self.expectedHeartbeatRegistration = None
@@ -54,11 +54,13 @@ class FIXConnectionHandler(object):
         await self.handle_close()
 
     async def _notifyMessageObservers(self, msg, direction, persistMessage=True):
-        if persistMessage is True:
-            self.engine.journaller.persistMsg(msg, self.session, direction)
-        for handler in filter(lambda x: (x[1] is None or x[1] == direction) and (x[2] is None or x[2] == msg.msgType),
-                              self.msgHandlers):
-            await handler[0](self, msg)
+        #if persistMessage is True:
+        #    self.engine.journaller.persistMsg(msg, self.session, direction)
+        #for handler in filter(lambda x: (x[1] is None or x[1] == direction) and (x[2] is None or x[2] == msg.msgType),
+        #                      self.msgHandlers):
+        #for handler in self.msgHandlers:
+        #    await handler[0](self, msg)
+        pass
 
     def addMessageHandler(self, handler, direction = None, msgType = None):
         self.msgHandlers.append((handler, direction, msgType))
@@ -91,13 +93,13 @@ class FIXConnectionHandler(object):
         gapFillEnd = int(beginSeqNo)
         for replayMsg in replayMsgs:
             msgSeqNum = int(replayMsg[protocol.fixtags.MsgSeqNum])
-            if replayMsg[protocol.fixtags.MsgType] in protocol.msgtype.sessionMessageTypes:
+            if replayMsg[protocol.fixtags.MsgType] in protocol.sessionMessageTypes:
                 gapFillEnd = msgSeqNum + 1
             else:
                 if self.engine.shouldResendMessage(self.session, replayMsg):
                     if gapFillBegin < gapFillEnd:
                         # we need to send a gap fill message
-                        gapFillMsg = FIXMessage(protocol.msgtype.SEQUENCERESET)
+                        gapFillMsg = FIXMessage(protocol.msgtype.SequenceReset)
                         gapFillMsg.setField(protocol.fixtags.GapFillFlag, 'Y')
                         gapFillMsg.setField(protocol.fixtags.MsgSeqNum, gapFillBegin)
                         gapFillMsg.setField(protocol.fixtags.NewSeqNo, str(gapFillEnd))
@@ -132,6 +134,7 @@ class FIXConnectionHandler(object):
         while True:
             try:
                 msg = await self.reader.read(8192)
+                print('read done', msg)
                 if not msg:
                     raise ConnectionError
                 self.msgBuffer = self.msgBuffer + msg
@@ -139,7 +142,8 @@ class FIXConnectionHandler(object):
                     if self.connectionState == ConnectionState.DISCONNECTED:
                         break
 
-                    (decodedMsg, parsedLength) = self.codec.decode(self.msgBuffer)
+                    (decodedMsg, parsedLength) = self.codec.decode2(self.msgBuffer)
+                    print('decoded', decodedMsg)
                     if decodedMsg is None:
                         break
                     await self.processMessage(decodedMsg)
@@ -153,11 +157,12 @@ class FIXConnectionHandler(object):
         return -1
 
     async def processMessage(self, decodedMsg):
+        print('processMessage')
         protocol = self.codec.protocol
 
         beginString = decodedMsg[protocol.fixtags.BeginString]
         if beginString != protocol.beginstring:
-            logging.warning("FIX BeginString is incorrect (expected: %s received: %s)", (protocol.beginstring, beginString))
+            logging.warning("FIX BeginString is incorrect (expected: %s received: %s)" % (protocol.beginstring, beginString))
             await self.disconnect()
             return
 
@@ -165,7 +170,8 @@ class FIXConnectionHandler(object):
 
         try:
             responses = []
-            if msgType in protocol.msgtype.sessionMessageTypes:
+            if msgType in protocol.sessionMessageTypes:
+                print('got here too')
                 (recvSeqNo, responses) = await self.handleSessionMessage(decodedMsg)
             else:
                 recvSeqNo = decodedMsg[protocol.fixtags.MsgSeqNum]
@@ -176,9 +182,9 @@ class FIXConnectionHandler(object):
             if seqNoState is False:
                 # We should send a resend request
                 logging.info("Requesting resend of messages: %s to %s" % (lastKnownSeqNo, 0))
-                responses.append(protocol.messages.Messages.resend_request(lastKnownSeqNo, 0))
+                responses.append(protocol.Messages.resend_request(lastKnownSeqNo, 0))
                 # we still need to notify if we are processing Logon message
-                if msgType == protocol.msgtype.LOGON:
+                if msgType == protocol.msgtype.Logon:
                     await self._notifyMessageObservers(decodedMsg, MessageDirection.INBOUND, False)
             else:
                 self.session.setRecvSeqNo(recvSeqNo)
@@ -216,13 +222,17 @@ class FIXConnectionHandler(object):
         if self.connectionState != ConnectionState.CONNECTED and self.connectionState != ConnectionState.LOGGED_IN:
             return
 
-        encodedMsg = self.codec.encode(msg, self.session).encode('utf-8')
-        self.writer.write(encodedMsg)
+        #body, encodedMsg = self.codec.encode(msg, self.session)
+        encodedMsg = self.codec.encode(msg, self.session)
+        print('send', encodedMsg)
+        rawMsg = encodedMsg.encode('utf-8')
+        self.writer.write(rawMsg)
         await self.writer.drain()
-        decodedMsg, junk = self.codec.decode(encodedMsg)
+        #decodedMsg, junk = self.codec.decode(encodedMsg)
 
         try:
-            await self._notifyMessageObservers(decodedMsg, MessageDirection.OUTBOUND)
+            pass
+            await self._notifyMessageObservers(rawMsg, MessageDirection.OUTBOUND)
         except DuplicateSeqNoError:
             logging.error("We have sent a message with a duplicate seq no, failed to persist it (MsgSeqNum: %s)" % (decodedMsg[self.codec.protocol.fixtags.MsgSeqNum]))
 
@@ -230,10 +240,11 @@ class FIXConnectionHandler(object):
 class FIXEndPoint(object):
     def __init__(self, engine, protocol):
         self.engine = engine
-        self.protocol = importlib.import_module(protocol)
+        self.protocol = LoadProtocol(protocol)
 
         self.connections = []
         self.connectionHandlers = []
+        self.connected = []
 
     def writable(self):
         return True
@@ -247,6 +258,10 @@ class FIXEndPoint(object):
     def addConnectionListener(self, handler, filter):
         self.connectionHandlers.append((handler, filter))
 
+    def addConnectionFuture(self, fut):
+        print('addConnectionFuture')
+        self.connected.append(fut)
+        
     def removeConnectionListener(self, handler, filter):
         for s in self.connectionHandlers:
             if s == (handler, filter):

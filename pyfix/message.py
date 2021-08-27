@@ -114,3 +114,16 @@ class FIXMessage(FIXContext):
 
     def setMsgType(self, msgType):
         self.msgType = msgType
+
+class FIXMessageSimple(object):
+    SOH = '\x01'
+    
+    def __init__(self, msg):
+        #msg = msg.decode('utf-8')
+        self.tags = tuple((int(k), v) for k, v in tuple((x.split('=')) for x in msg[:-1].split(self.SOH)))
+        self.msgType = self[35]
+
+    def __getitem__(self, tag):
+        for msgtag, value in self.tags:
+            if msgtag == tag:
+                return value

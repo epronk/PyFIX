@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from pyfix.message import FIXMessage, FIXContext
-from fixorchestra.orchestration import *
+from fixorchestra.orchestration import Orchestration, MessageField, Component, Group
 from more_itertools import peekable
-
+import pyfix.clock
+from pyfix.message import FIXMessageSimple
 
 class DictBuilder(object):
     def insert(self, obj, value):
@@ -183,7 +184,7 @@ class Codec(object):
 
     @staticmethod
     def current_datetime():
-        return datetime.utcnow().strftime("%Y%m%d-%H:%M:%S.%f")[:-3]
+        return pyfix.clock.clock().strftime("%Y%m%d-%H:%M:%S.%f")[:-3]
 
     def _addTag(self, body, t, msg):
         if msg.isRepeatingGroup(t):
@@ -250,6 +251,21 @@ class Codec(object):
 
         return fixmsg + SEP
 
+    def decode2(self, rawmsg):
+        #print('raw1', rawmsg)
+        SOH = '\x01'
+        rawmsg = rawmsg.decode('utf-8')
+
+        s = rawmsg.find(SOH)
+        if s == -1:
+            return None, 0
+        s2 = rawmsg.find(SOH, s + 1)
+        tag, value =rawmsg[s + 1 :s2].split('=')
+        length = int(value) + s2 + 8
+        decodedMsg = FIXMessageSimple(rawmsg[:length])
+        #print('raw2', rawmsg[:length])
+        return decodedMsg, length
+    
     def decode(self, rawmsg):
         rawmsg = rawmsg.decode('utf-8')
         tup = [(int(k), v) for k, v in tuple((x.split('=')) for x in rawmsg[:-1].split(self.SOH))]
